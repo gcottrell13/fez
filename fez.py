@@ -1,8 +1,10 @@
+import ast
 import re
 
 from typing import TypedDict
 
-from fezcompile import fezcompile
+from fezcompile import component
+from rw_signal import signal, ReadSignal
 
 
 def RENDER(item):
@@ -125,9 +127,21 @@ div = DIV()
 span = SPAN()
 
 
+@component
 def main(arg1):
-    return html[h1(style={"backgroundColor": "red"})[div["hi there"]]]
+    read, write = signal(0)
+
+    items: list[ReadSignal[int]] = []
+
+    def a():
+        return items
+
+    def c():
+        return {read(): v() for v in a()}
+
+    test: int
+    return html[h1(style={"backgroundColor": "red"})[div[c]]]
 
 
 if __name__ == "__main__":
-    print(fezcompile(main))
+    print(main(1))

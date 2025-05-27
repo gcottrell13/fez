@@ -1,59 +1,109 @@
-import ast
+import copy
 import inspect
-import js
+import ast
+
+from rw_signal import signal as SIGNALIS, ReadSignal
 
 
-def transform_stmt(stmt: ast.stmt) -> js.Statement:
-    match stmt:
-        case ast.FunctionDef(
-            name=name,
-            body=body,
-            args=args,
-            decorator_list=decorator_list,
-        ):
-            if args.kwarg or args.vararg or args.kwonlyargs or args.posonlyargs:
-                raise NotImplementedError("only positional arguments are implemented")
-            if args.defaults or args.kw_defaults:
-                raise NotImplementedError("default function values are not implemented")
-            return js.FunctionDef(
-                name=name,
-                args=[js.Identifier(arg.arg) for arg in args.args],
-                body=[transform_stmt(stmt) for stmt in body],
-            )
-        case ast.Return(value=expr):
-            return js.Return(value=transform_expr(expr))
-        case _:
-            return js.SingleLineComment(f"Not implemented: {ast.dump(stmt)}")
+class Visitor(ast.NodeTransformer):
+    def __init__(self, locals: dict, signals_locals: dict[str, type]):
+        self.locals = locals
+        self.signals_locals = signals_locals
+        self.signal_references: set[str] = set()
+
+    def visit_Name(self, node: ast.Name):
+        if isinstance(node.ctx, ast.Load) and node.id in self.signals_locals:
+            self.signal_references.add(node.id)
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        visitor = Visitor(self.locals.copy(), self.signals_locals.copy())
+        new_body = []
+        refs = set()
+        for item in node.body:
+            new_body.append(visitor.visit(item))
+            if new := visitor.signal_references.difference(refs):
+                refs.update(visitor.signal_references)
+        new_node = copy.copy(node)
+        new_node.body = new_body
+
+        line_info = {
+            "lineno": node.lineno,
+            "col_offset": node.col_offset,
+            "end_lineno": node.end_lineno,
+            "end_col_offset": node.end_col_offset,
+        }
+
+        if refs:
+            self.signals_locals[node.name] = node
+            new_node.decorator_list += [
+                ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name("signal", ctx=ast.Load(), **line_info),
+                        attr="func",
+                        ctx=ast.Load(),
+                        **line_info,
+                    ),
+                    args=[
+                        ast.Name(id=ref, ctx=ast.Load(), **line_info) for ref in refs
+                    ],
+                )
+            ]
+
+        return new_node
+
+    def visit_Assign(self, node: ast.Assign):
+        match node:
+            case ast.Assign(
+                targets=[ast.Tuple(elts=[ast.Name(id=read), ast.Name()])],
+                value=ast.Call(func=ast.Name(id=func_id)),
+            ) if (
+                self.locals.get(func_id) is SIGNALIS
+            ):
+                self.signals_locals[read] = ReadSignal
+            case ast.Assign(
+                value=ast.Call(func=ast.Name(id=func_id)),
+            ) if (
+                func_id in self.signals_locals
+            ):
+                self.signal_references.add(func_id)
+        return node
+
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        match node:
+            case ast.AnnAssign(
+                target=ast.Name(target, ctx=ast.Store()),
+                annotation=ast.Subscript(
+                    value=ast.Name(id="list"),
+                    slice=ast.Subscript(value=ast.Name(id="ReadSignal")),
+                ),
+                value=ast.List(),
+            ):
+                self.signals_locals[target] = list[ReadSignal]
+        return node
 
 
-def transform_expr(node: ast.expr) -> js.Expr:
-    match node:
-        case ast.Subscript(value=base, slice=sub):
-            return js.Subscript(transform_expr(base), transform_expr(sub))
-        case ast.Name(id=name, ctx=ast.Load()):
-            return js.LoadName(name)
-        case ast.Call(func=func, args=args, keywords=keywords):
-            keys = []
-            values = []
-            for k in keywords:
-                keys.append(js.Identifier(k.arg))
-                values.append(transform_expr(k.value))
-            return js.Call(
-                transform_expr(func),
-                [transform_expr(arg) for arg in args],
-                js.ObjectLiteral(keys, values),
-            )
-        case ast.Dict(keys=keys, values=values):
-            return js.ObjectLiteral(
-                [transform_expr(k) for k in keys], [transform_expr(v) for v in values]
-            )
-        case ast.Constant(value=value):
-            return js.Constant(value)
-        case _:
-            return js.InlineComment(f"Not implemented: {ast.dump(node)}")
+def visitor(locals, node: ast.stmt):
+
+    if not isinstance(node, ast.FunctionDef):
+        raise TypeError()
+
+    visitor = Visitor(locals, {})
+    new_body = []
+    for item in node.body:
+        new_body.append(visitor.visit(item))
+    new_node = copy.copy(node)
+    new_node.body = new_body
+
+    new_node.decorator_list = []
+    return new_node
 
 
-def fezcompile(fn):
+def component(fn):
+    locals = inspect.currentframe().f_back.f_locals
+
     source = inspect.getsource(fn)
     tree = ast.parse(source)
-    return js.dump(transform_stmt(tree.body[0]), js.Indenter("  "))
+    compiled = ast.unparse(visitor(locals, tree.body[0]))
+    exec(compiled, locals)
+    return locals[fn.__name__]
