@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+
+<head>
+<meta charset="utf-8">
+<script type="text/javascript" src="brython/brython.js"></script>
+<script type="text/javascript" src="brython/brython_stdlib.js"></script>
+</head>
+
+<body>
+<script type="text/python" src="fez.py" id="fez"></script>
+<script type="text/python">
+    from browser import document, html
+    from fez import main_component as main
+    main().render(document)
+</script>
+</body>
+
+</html>
